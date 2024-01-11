@@ -1,0 +1,209 @@
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+import time
+
+# Parameters for data processing
+use_raw_returns = True # Choose between True or False if using Moving Averages
+moving_average_days = 60  # This is used if use_raw_returns is False
+
+# Function to fetch and preprocess stock data
+def fetch_data(tickers, start_date, end_date, file_path):
+    data = yf.download(tickers, start=start_date, end=end_date)
+    adjusted_close = data['Adj Close'].copy()
+    adjusted_close.ffill(inplace=True)  # Forward fill
+    adjusted_close.bfill(inplace=True)  # Backward fill
+    adjusted_close.to_excel(file_path)  # Save the raw data to specified excel file
+    raw_returns = adjusted_close.pct_change().dropna()
+    moving_average_returns = raw_returns.rolling(window=moving_average_days).mean().dropna() if moving_average_days > 0 else raw_returns
+    return raw_returns, moving_average_returns
+
+# Function to check if desired return is feasible
+def is_feasible(returns, desired_return):
+    if desired_return is None:
+        return True
+    max_return = returns.mean().max() * 252
+    return desired_return < max_return
+
+def random_initial_guess(num_assets):
+    initial_weights = np.random.random(num_assets)
+    initial_weights /= np.sum(initial_weights)  # Normalize so that sum of weights is 1
+    return initial_weights
+
+# Portfolio Optimization Function
+def optimize_portfolio(risk_tolerance, desired_return, returns, covariance_matrix, risk_free_rate):
+    num_assets = len(returns.columns)
+    initial_guess = random_initial_guess(num_assets)
+    bounds = tuple((0, 1) for asset in range(num_assets))
+    constraints = [{'type': 'eq', 'fun': check_sum}]
+    if desired_return is not None and is_feasible(returns, desired_return):
+        constraints.append({'type': 'eq', 'fun': lambda x: portfolio_return(x, returns) - desired_return})
+        objective_function = lambda x: negative_sharpe_ratio(x, returns, covariance_matrix, risk_free_rate)
+    elif risk_tolerance == 'aggressive':
+        objective_function = lambda x: -portfolio_return(x, returns)
+    elif risk_tolerance == 'moderate':
+        objective_function = lambda x: negative_sharpe_ratio(x, returns, covariance_matrix, risk_free_rate)
+    else:
+        objective_function = lambda x: minimize_volatility(x, covariance_matrix)
+    result = minimize(portfolio_volatility, num_assets * [1. / num_assets], args=(covariance_matrix,), method='SLSQP', bounds=bounds, constraints=constraints)
+    if not result.success:
+        raise ValueError(f"Optimization did not converge: {result.message}")
+    return result.x
+
+# Functions for portfolio metrics
+def portfolio_return(weights, returns):
+    return np.sum(weights * returns.mean()) * 252
+
+def portfolio_volatility(weights, covariance_matrix):
+    return np.sqrt(np.dot(weights.T, np.dot(covariance_matrix, weights))) * np.sqrt(252)
+
+def negative_sharpe_ratio(weights, returns, covariance_matrix, risk_free_rate):
+    p_ret = portfolio_return(weights, returns)
+    p_vol = portfolio_volatility(weights, covariance_matrix)
+    return -(p_ret - risk_free_rate) / p_vol
+
+def check_sum(weights):
+    return np.sum(weights) - 1
+
+def minimize_volatility(weights, covariance_matrix):
+    return portfolio_volatility(weights, covariance_matrix)
+
+# Functions for efficient frontier
+def efficient_frontier(returns, covariance_matrix, num_portfolios=100):
+    num_assets = len(returns.columns)
+    bounds = tuple((0, 1) for asset in range(num_assets))
+    # Adjust the range of target returns
+    lower_bound = np.percentile(returns.mean(), 10) * 252
+    upper_bound = np.percentile(returns.mean(), 90) * 252
+    portfolio_means = np.linspace(lower_bound, upper_bound, num_portfolios)
+    efficient_portfolios = []
+    
+    for target_mean in portfolio_means:
+        constraints = [{'type': 'eq', 'fun': check_sum},
+                       {'type': 'eq', 'fun': lambda x: portfolio_return(x, returns) - target_mean}]
+        
+        result = minimize(portfolio_volatility, num_assets * [1. / num_assets], args=(covariance_matrix,),
+                          method='SLSQP', bounds=bounds, constraints=constraints)
+        if result.success:
+            efficient_portfolios.append(result.x)
+    
+    return np.array(efficient_portfolios)
+
+# Monte Carlo Simulation Function
+def monte_carlo_simulation(returns, weights, num_simulations, day_counts):
+    results = {}
+    for num_days in day_counts:
+        portfolio_ret = np.sum(returns.mean() * weights) * num_days
+        portfolio_std_dev = portfolio_volatility(weights, returns.cov()) * np.sqrt(num_days)
+        simulated_end_values = np.zeros(num_simulations)
+        for i in range(num_simulations):
+            simulated_returns = np.random.normal(portfolio_ret, portfolio_std_dev, 1)
+            simulated_end_values[i] = simulated_returns
+        results[num_days] = {
+            "mean": np.mean(simulated_end_values),
+            "median": np.median(simulated_end_values),
+            "std_dev": np.std(simulated_end_values),
+            "percentile_5": np.percentile(simulated_end_values, 5),
+            "percentile_95": np.percentile(simulated_end_values, 95),
+            "var_95": np.percentile(simulated_end_values, 5),
+            "cvar_95": simulated_end_values[simulated_end_values <= np.percentile(simulated_end_values, 5)].mean()
+        }
+    return results
+
+# Function to calculate expected returns for different time horizons
+def calculate_optimization_expected_returns(returns, weights, day_counts):
+    annualized_returns = returns.mean() * 252
+    expected_returns = {}
+    for num_days in day_counts:
+        expected_return = np.dot(annualized_returns, weights) * (num_days / 252)
+        expected_returns[num_days] = expected_return
+    return expected_returns
+
+# Main execution block
+def main():
+    try:
+        tickers = ["AAPL", "MSFT", "GOOG"]
+        start_date = "2010-01-01"
+        end_date = "2024-01-01"
+        file_path = "/Users/nicolasmaldonado/Documents/Maverick/MPT Script/historical_stock_data.xlsx"
+
+        # Fetch data
+        raw_returns, moving_average_returns = fetch_data(tickers, start_date, end_date, file_path)
+
+        # Choose returns based on preference
+        returns_to_use = raw_returns if use_raw_returns else moving_average_returns
+        cov_matrix = returns_to_use.cov()
+
+        # Update risk-free rate based on current market conditions
+        risk_free_rate = 0.03  # Example: 1% annual rate
+
+        # Optimization
+        risk_tolerance = "moderate"
+        desired_return = None
+        optimal_weights = optimize_portfolio(risk_tolerance, desired_return, returns_to_use, cov_matrix, risk_free_rate)
+        print("Optimal Portfolio Weights:")
+        for ticker, weight in zip(tickers, optimal_weights):
+            if weight > 1e-3:
+                print(f"{ticker}: {weight:.2%}")
+
+         # Time horizons for analysis
+        time_horizons = [252, 756, 1260]  # 1 year, 3 years, 5 years
+
+        # Efficient Frontier Calculation
+        efficient_portfolios = efficient_frontier(returns_to_use, cov_matrix)
+
+        # Plotting the Efficient Frontier with the Optimal Portfolio
+        plt.figure(figsize=(12, 8))
+        plt.title('Efficient Frontier with My Optimal Portfolio')
+        plt.xlabel('Volatility (Standard Deviation)')
+        plt.ylabel('Expected Return')
+
+        # Calculate portfolio risk and return for each portfolio on the efficient frontier
+        portfolio_risks = [portfolio_volatility(weights, cov_matrix) for weights in efficient_portfolios]
+        portfolio_returns = [portfolio_return(weights, returns_to_use) for weights in efficient_portfolios]
+
+        plt.plot(portfolio_risks, portfolio_returns, 'o-', markersize=2, label='Efficient Frontier')
+
+        # Plot the Optimal Portfolio
+        optimal_portfolio_volatility = portfolio_volatility(optimal_weights, cov_matrix)
+        optimal_portfolio_return = portfolio_return(optimal_weights, returns_to_use)
+        plt.scatter(optimal_portfolio_volatility, optimal_portfolio_return, color='red', marker='*', s=100, label='My Optimal Portfolio')
+
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+        
+        # Monte Carlo Simulation
+        monte_carlo_results = monte_carlo_simulation(returns_to_use, optimal_weights, 10000, time_horizons)
+        print("\nMonte Carlo Simulation Results:")
+        for days, result in monte_carlo_results.items():
+            print(f"\nResults for {days//252} year(s):")
+            print(f"Mean Return: {result['mean']:.2%}")
+            print(f"Median Return: {result['median']:.2%}")
+            print(f"Standard Deviation: {result['std_dev']:.2%}")
+            print(f"5th Percentile (VaR 95%): {result['percentile_5']:.2%}")
+            print(f"95th Percentile: {result['percentile_95']:.2%}")
+            print(f"Value at Risk (VaR 95%): {result['var_95']:.2%}")
+            print(f"Conditional Value at Risk (CVaR 95%): {result['cvar_95']:.2%}")
+
+        # Optimization-Based Expected Returns
+        optimization_returns = calculate_optimization_expected_returns(returns_to_use, optimal_weights, time_horizons)
+        print("\nOptimization-Based Expected Returns:")
+        for days, expected_return in optimization_returns.items():
+            print(f"For {days//252} year(s): {expected_return:.2%}")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+    # Print the current working directory
+    import os
+    print("\nCurrent Working Directory:", os.getcwd())
+
+if __name__ == "__main__":
+    start_time = time.time()
+    main()
+    end_time = time.time()
+    total_time = end_time - start_time
+    print(f"\nTotal execution time: {total_time:.2f} seconds")
