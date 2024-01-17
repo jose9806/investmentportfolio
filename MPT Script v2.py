@@ -10,7 +10,19 @@ import matplotlib.pyplot as plt
 import scipy.stats as stats
 from scipy.stats import shapiro, kurtosis
 
-s3 = boto3.client('s3') 
+# Set up boto3 client with environment variables for AWS credentials
+aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
+aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+
+# If the keys are not found, raise an exception
+if not aws_access_key_id or not aws_secret_access_key:
+    raise ValueError("Missing AWS credentials")
+
+s3 = boto3.client(
+    's3',
+    aws_access_key_id=aws_access_key_id,
+    aws_secret_access_key=aws_secret_access_key
+)
 
 # Function to fetch and preprocess stock data
 def fetch_data(tickers, start_date, end_date):
@@ -25,7 +37,7 @@ def fetch_data(tickers, start_date, end_date):
     with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
         adjusted_close.to_excel(writer)
     excel_buffer.seek(0)
-    s3.put_object(Bucket='your-bucket-name', Key='historical_stock_data.xlsx', Body=excel_buffer.read())
+    s3.put_object(Bucket='portfoliooptimizationv2', Key='historical_stock_data.xlsx', Body=excel_buffer.read())
 
     # Calculate raw returns
     return adjusted_close.pct_change().dropna()
@@ -119,16 +131,16 @@ def efficient_frontier(returns, covariance_matrix, num_portfolios=100):
     upper_bound = np.percentile(returns.mean(), 90) * 252
     portfolio_means = np.linspace(lower_bound, upper_bound, num_portfolios)
     efficient_portfolios = []
-    
+
     for target_mean in portfolio_means:
         constraints = [{'type': 'eq', 'fun': check_sum},
                        {'type': 'eq', 'fun': lambda x: portfolio_return(x, returns) - target_mean}]
-        
+
         result = minimize(portfolio_volatility, num_assets * [1. / num_assets], args=(covariance_matrix,),
                           method='SLSQP', bounds=bounds, constraints=constraints)
         if result.success:
             efficient_portfolios.append(result.x)
-    
+
     return np.array(efficient_portfolios)
 
 # Monte Carlo Simulation Function
@@ -186,40 +198,40 @@ def plot_efficient_frontier(returns, cov_matrix, optimal_weights, tickers, effic
 
     # Create a Figure object and save to S3
     fig = plt.gcf()  # Get current figure
-    save_plot_to_s3(fig, 'your-bucket-name', 'efficient_frontier.png')    
+    save_plot_to_s3(fig, 'portfoliooptimizationv2', 'efficient_frontier.png')    
 
 def lambda_handler(event, context):
     try:
-        # Extract parameters from the event object (e.g., API Gateway)
-        tickers = os.environ.get("tickers", "AAPL,MSFT,GOOG").split(',')
-        start_date = os.environ.get("start_date", "2010-01-01")
-        end_date = os.environ.get("end_date", "2024-01-01")
-        risk_tolerance = os.environ.get("risk_tolerance", "moderate")
-        risk_free_rate = os.environ.get("risk_free_rate", 0.03)
-        time_horizons = os.environ.get("time_horizons", [252, 756, 1260])
-        num_simulations = os.environ.get("num_simulations", 10000)
+      # Extract parameters from the event object (e.g., API Gateway) or fall back to environment variables
+      tickers = event.get("tickers", os.environ.get("tickers")).split(',')
+      start_date = event.get("start_date", os.environ.get("start_date"))
+      end_date = event.get("end_date", os.environ.get("end_date"))
+      risk_tolerance = event.get("risk_tolerance", os.environ.get("risk_tolerance"))
+      risk_free_rate = float(event.get("risk_free_rate", os.environ.get("risk_free_rate")))
+      time_horizons = list(map(int, event.get("time_horizons", os.environ.get("time_horizons")).split(',')))
+      num_simulations = int(event.get("num_simulations", os.environ.get("num_simulations")))
 
-        # Fetch data
-        returns = fetch_data(tickers, start_date, end_date)
-        cov_matrix = returns.cov()
+      # Fetch data
+      returns = fetch_data(tickers, start_date, end_date)
+      cov_matrix = returns.cov()
 
-        # Optimization
-        optimal_weights = optimize_portfolio(risk_tolerance, returns, cov_matrix, risk_free_rate)
-        print("Optimal Portfolio Weights:")
-        for ticker, weight in zip(tickers, optimal_weights):
+      # Optimization
+      optimal_weights = optimize_portfolio(risk_tolerance, returns, cov_matrix, risk_free_rate)
+      print("Optimal Portfolio Weights:")
+      for ticker, weight in zip(tickers, optimal_weights):
             if weight > 1e-3:
                 print(f"{ticker}: {weight:.2%}")            
 
-        # Efficient Frontier Calculation
-        efficient_portfolios = efficient_frontier(returns, cov_matrix)
+      # Efficient Frontier Calculation
+      efficient_portfolios = efficient_frontier(returns, cov_matrix)
 
-        # Plotting the Efficient Frontier with the Optimal Portfolio
-        plot_efficient_frontier(returns, cov_matrix, optimal_weights, tickers, efficient_portfolios)
-        
-        # Monte Carlo Simulation
-        monte_carlo_results = monte_carlo_simulation(returns, optimal_weights, num_simulations, time_horizons)
-        print("\nMonte Carlo Simulation Results:")
-        for days, result in monte_carlo_results.items():
+      # Plotting the Efficient Frontier with the Optimal Portfolio
+      plot_efficient_frontier(returns, cov_matrix, optimal_weights, tickers, efficient_portfolios)
+
+      # Monte Carlo Simulation
+      monte_carlo_results = monte_carlo_simulation(returns, optimal_weights, num_simulations, time_horizons)
+      print("\nMonte Carlo Simulation Results:")
+      for days, result in monte_carlo_results.items():
             print(f"\nResults for {days//252} year(s):")
             print(f"Mean Return: {result['mean']:.2%}")
             print(f"Median Return: {result['median']:.2%}")
@@ -228,23 +240,23 @@ def lambda_handler(event, context):
             print(f"95th Percentile: {result['percentile_95']:.2%}")
             print(f"Conditional Value at Risk (CVaR 95%): {result['cvar_95']:.2%}")
 
-        # Optimization-Based Expected Returns
-        optimization_returns = calculate_optimization_expected_returns(returns, optimal_weights, time_horizons)
-        print("\nOptimization-Based Expected Returns:")
-        for days, expected_return in optimization_returns.items():
+      # Optimization-Based Expected Returns
+      optimization_returns = calculate_optimization_expected_returns(returns, optimal_weights, time_horizons)
+      print("\nOptimization-Based Expected Returns:")
+      for days, expected_return in optimization_returns.items():
             print(f"For {days//252} year(s): {expected_return:.2%}")  
 
     # Return a response
-        return {
+      return {
             "statusCode": 200,
             "body": json.dumps("Portfolio analysis completed successfully!")
         }        
 
     except Exception as e:
-        # Return an error response
-        return {
-            "statusCode": 500,
-            "body": json.dumps(f"An error occurred: {str(e)}")
-        }
-    
+      # Return an error response
+      return {
+          "statusCode": 500,
+          "body": json.dumps(f"An error occurred: {str(e)}")
+      }
+
 lambda_handler({},{})
