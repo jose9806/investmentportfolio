@@ -9,6 +9,10 @@ import io
 import matplotlib.pyplot as plt
 import scipy.stats as stats
 from scipy.stats import shapiro, kurtosis
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Set up boto3 client with environment variables for AWS credentials
 aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
@@ -18,6 +22,7 @@ aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
 if not aws_access_key_id or not aws_secret_access_key:
     raise ValueError("Missing AWS credentials")
 
+# Initialize boto3 client
 s3 = boto3.client(
     's3',
     aws_access_key_id=aws_access_key_id,
@@ -26,20 +31,29 @@ s3 = boto3.client(
 
 # Function to fetch and preprocess stock data
 def fetch_data(tickers, start_date, end_date):
-    # Fetch stock data
-    data = yf.download(tickers, start=start_date, end=end_date)
+    logging.info(f"Fetching data for tickers: {tickers} from {start_date} to {end_date}")
+    try:
+        data = yf.download(tickers, start=start_date, end=end_date)
+    except Exception as e:
+        logging.error(f"Error fetching data from yfinance: {e}")
+        raise
+
+    # Data preprocessing
     adjusted_close = data['Adj Close'].copy()
-    adjusted_close.ffill(inplace=True)  # Forward fill
-    adjusted_close.bfill(inplace=True)  # Backward fill
+    adjusted_close.ffill(inplace=True)
+    adjusted_close.bfill(inplace=True)
 
     # Save to S3
-    excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-        adjusted_close.to_excel(writer)
-    excel_buffer.seek(0)
-    s3.put_object(Bucket='portfoliooptimizationv2', Key='historical_stock_data.xlsx', Body=excel_buffer.read())
+    try:
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+            adjusted_close.to_excel(writer)
+        excel_buffer.seek(0)
+        s3.put_object(Bucket='portfoliooptimizationv2', Key='historical_stock_data.xlsx', Body=excel_buffer.read())
+    except Exception as e:
+        logging.error(f"Error saving data to S3: {e}")
+        raise
 
-    # Calculate raw returns
     return adjusted_close.pct_change().dropna()
 
 def assess_normality(returns):
@@ -247,16 +261,16 @@ def lambda_handler(event, context):
             print(f"For {days//252} year(s): {expected_return:.2%}")  
 
     # Return a response
+      logging.info("Portfolio analysis completed successfully!")
       return {
             "statusCode": 200,
             "body": json.dumps("Portfolio analysis completed successfully!")
-        }        
-
+        }
     except Exception as e:
-      # Return an error response
-      return {
-          "statusCode": 500,
-          "body": json.dumps(f"An error occurred: {str(e)}")
-      }
+        logging.error(f"An error occurred in the lambda handler: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps(f"An error occurred: {str(e)}")
+        }
 
 lambda_handler({},{})
