@@ -8,4 +8,4 @@ RUN  pip install -r requirements.txt
 COPY . ${LAMBDA_TASK_ROOT}/
 
 # Set the CMD to handler
-CMD ["MPT SCRIPT V2.handler"]
+CMD ["MPT_Script_v2.handler"]

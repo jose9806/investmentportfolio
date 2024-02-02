@@ -15,18 +15,10 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Set up boto3 client with environment variables for AWS credentials
-aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
-aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
-
-# If the keys are not found, raise an exception
-if not aws_access_key_id or not aws_secret_access_key:
-    raise ValueError("Missing AWS credentials")
 
 # Initialize boto3 client
 s3 = boto3.client(
-    's3',
-    aws_access_key_id=aws_access_key_id,
-    aws_secret_access_key=aws_secret_access_key
+    's3'
 )
 
 # Function to fetch and preprocess stock data
@@ -214,7 +206,7 @@ def plot_efficient_frontier(returns, cov_matrix, optimal_weights, tickers, effic
     fig = plt.gcf()  # Get current figure
     save_plot_to_s3(fig, 'portfoliooptimizationv2', 'efficient_frontier.png')    
 
-def lambda_handler(event, context):
+def handler(event, context):
     try:
       # Extract parameters from the event object (e.g., API Gateway) or fall back to environment variables
       tickers = event.get("tickers", os.environ.get("tickers")).split(',')
@@ -234,7 +226,7 @@ def lambda_handler(event, context):
       print("Optimal Portfolio Weights:")
       for ticker, weight in zip(tickers, optimal_weights):
             if weight > 1e-3:
-                print(f"{ticker}: {weight:.2%}")            
+                print(f"{ticker}: {weight:.2%}")
 
       # Efficient Frontier Calculation
       efficient_portfolios = efficient_frontier(returns, cov_matrix)
@@ -272,5 +264,3 @@ def lambda_handler(event, context):
             "statusCode": 500,
             "body": json.dumps(f"An error occurred: {str(e)}")
         }
-
-lambda_handler({},{})
